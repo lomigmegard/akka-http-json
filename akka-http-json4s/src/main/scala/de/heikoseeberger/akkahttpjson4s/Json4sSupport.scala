@@ -16,12 +16,14 @@
 
 package de.heikoseeberger.akkahttpjson4s
 
+import java.io.InputStream
 import java.lang.reflect.InvocationTargetException
 
 import akka.http.scaladsl.marshalling.{ Marshaller, ToEntityMarshaller }
 import akka.http.scaladsl.model.MediaTypes.`application/json`
 import akka.http.scaladsl.unmarshalling.{ FromEntityUnmarshaller, Unmarshaller }
-import org.json4s.{ Formats, MappingException, Serialization }
+import akka.util.ByteString
+import org.json4s.{ Formats, MappingException, Serialization, StreamInput }
 
 /**
  * Automatic to and from JSON marshalling/unmarshalling using an in-scope *Json4s* protocol.
@@ -46,22 +48,31 @@ object Json4sSupport extends Json4sSupport {
 trait Json4sSupport {
   import Json4sSupport._
 
+  private val jsonInputStreamUnmarshaller: FromEntityUnmarshaller[InputStream] =
+    Unmarshaller
+      .byteStringUnmarshaller
+      .forContentTypes(`application/json`)
+      .map {
+        case ByteString.empty ⇒ throw Unmarshaller.NoContentException
+        case data             ⇒ data.iterator.asInputStream
+      }
+
+  private val jsonMarshaller: ToEntityMarshaller[String] =
+    Marshaller.stringMarshaller(`application/json`)
+
   /**
    * HTTP entity => `A`
    *
    * @tparam A type to decode
    * @return unmarshaller for `A`
    */
-  implicit def json4sUnmarshaller[A: Manifest](implicit serialization: Serialization, formats: Formats): FromEntityUnmarshaller[A] =
-    Unmarshaller
-      .byteStringUnmarshaller
-      .forContentTypes(`application/json`)
-      .mapWithCharset { (data, charset) =>
-        try serialization.read(data.decodeString(charset.nioCharset.name))
-        catch {
-          case MappingException("unknown error", ite: InvocationTargetException) => throw ite.getCause
-        }
-      }
+  implicit def json4sUnmarshaller[A: Manifest](implicit serialization: Serialization, formats: Formats): FromEntityUnmarshaller[A] = {
+    jsonInputStreamUnmarshaller.map { is ⇒
+      serialization.read(StreamInput(is))
+    } recover (_ ⇒ _ ⇒ {
+      case MappingException("unknown error", ite: InvocationTargetException) ⇒ throw ite.getCause
+    })
+  }
 
   /**
    * `A` => HTTP entity
@@ -71,7 +82,7 @@ trait Json4sSupport {
    */
   implicit def json4sMarshaller[A <: AnyRef](implicit serialization: Serialization, formats: Formats, shouldWritePretty: ShouldWritePretty = ShouldWritePretty.False): ToEntityMarshaller[A] =
     shouldWritePretty match {
-      case ShouldWritePretty.False => Marshaller.StringMarshaller.wrap(`application/json`)(serialization.write[A])
-      case _                       => Marshaller.StringMarshaller.wrap(`application/json`)(serialization.writePretty[A])
+      case ShouldWritePretty.False ⇒ jsonMarshaller.compose(serialization.write[A])
+      case _                       ⇒ jsonMarshaller.compose(serialization.writePretty[A])
     }
 }

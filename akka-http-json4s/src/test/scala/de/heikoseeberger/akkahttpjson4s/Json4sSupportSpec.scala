@@ -18,20 +18,20 @@ package de.heikoseeberger.akkahttpjson4s
 
 import akka.actor.ActorSystem
 import akka.http.scaladsl.marshalling.Marshal
-import akka.http.scaladsl.model.{ HttpEntity, MediaTypes, RequestEntity }
-import akka.http.scaladsl.unmarshalling.Unmarshal
+import akka.http.scaladsl.model.ContentTypes.`application/json`
+import akka.http.scaladsl.model.{HttpEntity, RequestEntity}
+import akka.http.scaladsl.unmarshalling.Unmarshaller.UnsupportedContentTypeException
+import akka.http.scaladsl.unmarshalling.{Unmarshal, Unmarshaller}
 import akka.stream.ActorMaterializer
-import org.json4s.{ DefaultFormats, jackson, native }
-import org.scalatest.{ BeforeAndAfterAll, Matchers, WordSpec }
-
-import scala.concurrent.Await
-import scala.concurrent.duration.{ Duration, DurationInt }
+import org.json4s.{DefaultFormats, jackson, native}
+import org.scalatest.concurrent.ScalaFutures
+import org.scalatest.{BeforeAndAfterAll, Matchers, WordSpec}
 
 object Json4sSupportSpec {
   case class Foo(bar: String) { require(bar == "bar", "bar must be 'bar'!") }
 }
 
-class Json4sSupportSpec extends WordSpec with Matchers with BeforeAndAfterAll {
+class Json4sSupportSpec extends WordSpec with Matchers with ScalaFutures with BeforeAndAfterAll {
   import Json4sSupport._
   import Json4sSupportSpec._
 
@@ -46,26 +46,45 @@ class Json4sSupportSpec extends WordSpec with Matchers with BeforeAndAfterAll {
 
     "enable marshalling and unmarshalling objects for `DefaultFormats` and `jackson.Serialization`" in {
       implicit val serialization = jackson.Serialization
-      val entity = Await.result(Marshal(foo).to[RequestEntity], 100.millis)
-      Await.result(Unmarshal(entity).to[Foo], 100.millis) shouldBe foo
+      val entity = Marshal(foo).to[RequestEntity].futureValue
+      entity.contentType shouldBe `application/json`
+      Unmarshal(entity).to[Foo].futureValue shouldBe foo
     }
 
-    "enable marshalling and unmarshalling objects for default `DefaultFormats` and `native.Serialization`" in {
+    "enable marshalling and unmarshalling objects for `DefaultFormats` and `native.Serialization`" in {
       implicit val serialization = native.Serialization
-      val entity = Await.result(Marshal(foo).to[RequestEntity], 100.millis)
-      Await.result(Unmarshal(entity).to[Foo], 100.millis) shouldBe foo
+      val entity = Marshal(foo).to[RequestEntity].futureValue
+      entity.contentType shouldBe `application/json`
+      Unmarshal(entity).to[Foo].futureValue shouldBe foo
     }
 
     "provide proper error messages for requirement errors" in {
       implicit val serialization = native.Serialization
-      val entity = HttpEntity(MediaTypes.`application/json`, """{ "bar": "baz" }""")
-      val iae = the[IllegalArgumentException] thrownBy Await.result(Unmarshal(entity).to[Foo], 100.millis)
-      iae should have message "requirement failed: bar must be 'bar'!"
+      val entity = HttpEntity(`application/json`, """{ "bar": "baz" }""")
+      val ex = Unmarshal(entity).to[Foo].failed.futureValue
+      ex shouldBe an [IllegalArgumentException]
+      ex should have message "requirement failed: bar must be 'bar'!"
+    }
+
+    "throw NoContentException for empty entities" in {
+      implicit val serialization = native.Serialization
+      val entity = HttpEntity.empty(`application/json`)
+      val ex = Unmarshal(entity).to[Foo].failed.futureValue
+      ex shouldBe Unmarshaller.NoContentException
+      ex should have message "Message entity must not be empty"
+    }
+
+    "throw UnsupportedContentTypeException when Content-Type is not `application/json`" in {
+      implicit val serialization = native.Serialization
+      val entity = HttpEntity("""{ "bar": "bar" }""")
+      val ex = Unmarshal(entity).to[Foo].failed.futureValue
+      ex shouldBe an [UnsupportedContentTypeException]
+      ex should have message "Unsupported Content-Type, supported: application/json"
     }
   }
 
   override protected def afterAll() = {
-    Await.ready(system.terminate(), Duration.Inf)
+    system.terminate().futureValue
     super.afterAll()
   }
 }
